@@ -120,50 +120,9 @@ discord-music-bot/
 
 ---
 
-## Setup & Local Development
+## Testing & Reliability
 
-### 1. Discord Developer Portal Checklist
-
-1. Open the [Discord Developer Portal](https://discord.com/developers/applications) → your application → **Bot**.
-2. Turn **ON** **Message Content Intent** under **Privileged Gateway Intents** → **Save Changes** *(required for `d!` prefix commands)*.
-3. Under **OAuth2**, ensure **Requires OAuth2 Code Grant** is **OFF**.
-4. *(Recommended)* Turn **OFF** **Public Bot** if you only want to run the bot in your own server(s).
-5. *(Optional)* Upload custom PNG/GIF icons under **Emojis** matching slot names from `d!emojis` to customize buttons and embeds.
-
-### 2. Run Locally
-
-```bash
-npm install
-cp .env.example .env
-# Edit .env and set DISCORD_TOKEN=your_token_here
-npm start
-```
-
-### 3. Run the Test Suite
-
-```bash
-npm test
-```
-
-All **58 unit tests** cover config parsing, command registration, SSRF/access security, 4-source search relevance & Spotify ISRC pairing, node discovery/DAVE compatibility/failover scoring, 15-band EQ & instant filter flush, smooth pre-buffer cancellation, 24/7 radio validation, embeds/emojis, and Session Host vote-skip logic.
-
----
-
-## Deployment Options
-
-### Option A: Zero-Cost Hosting on Wispbyte (Node.js)
-
-1. Create a free Node.js server on Wispbyte and add `DISCORD_TOKEN=...` to `.env` (no Lavalink setup needed — public NodeLink v3 / Lavalink v4.2+ auto-discovery works out of the box).
-2. Upload the project files (excluding `node_modules/` and `.env`) in the **Files** tab.
-3. Click **Start** / **Restart** in **Console**.
-
-### Option B: Self-Hosted Bot + Private Lavalink (Docker Compose)
-
-```bash
-cp .env.example .env
-# Set DISCORD_TOKEN, LAVALINK_HOST=lavalink, LAVALINK_PORT=2333, LAVALINK_PASSWORD=youshallnotpass, AUTO_PUBLIC_NODES=false
-docker compose up -d
-```
+The codebase is verified with **58 unit tests** written with Node.js's built-in `node:test` runner, covering configuration parsing, command registration, SSRF & access-control guards, 4-source search relevance & Spotify ISRC pairing, node discovery/DAVE compatibility/failover scoring, 15-band EQ & instant filter flushing, pre-buffer cancellation, 24/7 radio validation, embeds/emojis, and Session Host vote-skip logic.
 
 ---
 
