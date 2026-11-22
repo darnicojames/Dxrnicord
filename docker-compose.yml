@@ -1,0 +1,58 @@
+# ==============================================================================
+# Self-Hosted Stack: Discord Music Bot + Private Lavalink v4.2+ Server (DAVE E2EE)
+# Ideal for Oracle Cloud Always Free (Ampere ARM 24GB RAM, $0/month forever)
+# or any free/cheap Docker VPS.
+#
+# Usage:
+#   1. Copy .env.example to .env and set DISCORD_TOKEN
+#   2. Set LAVALINK_HOST=lavalink, LAVALINK_PORT=2333, LAVALINK_PASSWORD=youshallnotpass
+#   3. Run: docker compose up -d
+# ==============================================================================
+
+services:
+  lavalink:
+    image: ghcr.io/lavalink-devs/lavalink:4
+    container_name: music-lavalink
+    restart: unless-stopped
+    environment:
+      - _JAVA_OPTIONS=-Xmx512M
+      - SERVER_PORT=2333
+      - LAVALINK_SERVER_PASSWORD=${LAVALINK_PASSWORD:-youshallnotpass}
+      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID:-}
+      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET:-}
+    volumes:
+      - ./lavalink/application.yml:/opt/Lavalink/application.yml:ro
+      - lavalink-plugins:/opt/Lavalink/plugins
+    networks:
+      - music-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- --header='Authorization: ${LAVALINK_PASSWORD:-youshallnotpass}' http://localhost:2333/v4/info || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  bot:
+    build: .
+    container_name: music-bot
+    restart: unless-stopped
+    depends_on:
+      lavalink:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - LAVALINK_HOST=lavalink
+      - LAVALINK_PORT=2333
+      - LAVALINK_PASSWORD=${LAVALINK_PASSWORD:-youshallnotpass}
+      - LAVALINK_SECURE=false
+      - AUTO_PUBLIC_NODES=false
+    networks:
+      - music-net
+
+volumes:
+  lavalink-plugins:
+
+networks:
+  music-net:
+    driver: bridge

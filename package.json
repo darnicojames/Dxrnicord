@@ -1,0 +1,21 @@
+{
+  "name": "discord-music-bot",
+  "version": "1.0.0",
+  "description": "Ultra-lightweight Discord music bot supporting YouTube, Spotify, SoundCloud, Apple Music, Deezer, Bandcamp, Twitch, and radio streams — built for 2026 Discord DAVE E2EE & $0 always-free hosting.",
+  "type": "module",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "clear-commands": "node src/deploy-commands.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.28.1",
+    "dotenv": "^18.0.10",
+    "lavalink-client": "^2.11.2"
+  }
+}
