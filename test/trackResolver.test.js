@@ -343,11 +343,83 @@ test("searchAllSources queries YouTube, Spotify, Deezer, and SoundCloud in paral
     },
   };
 
-  const result = await searchAllSources(fakePlayer, "Take It To The Head DJ Khaled", { id: "u1" });
+  const result = await searchAllSources(fakePlayer, "Take It To The Head DJ Khaled", { id: "u1" }, {
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({
+        data: [{ title: "Take It To The Head (Explicit Version)", artist: { name: "DJ Khaled" }, explicit_lyrics: true }],
+      }),
+    }),
+  });
   assert.deepEqual([...searched].sort(), ["dzsearch", "scsearch", "spsearch", "ytmsearch"]);
   assert.equal(result.respondedSources.length, 4);
   assert.equal(result.rankedTracks.length, 4);
-  // Best track must be DJ Khaled (either Deezer direct match or Spotify paired with Deezer direct stream)
+  assert.equal(result.isExplicit, true);
+  // Best track must be DJ Khaled on non-YouTube direct stream
   assert.equal(result.bestTrack.info.author, "DJ Khaled");
   assert.equal(result.bestTrack.encoded, "dz-exact");
+});
+
+test("searchAllSources routes explicit songs to non-YouTube and non-explicit songs to YouTube (with alt fallback when YouTube misses)", async () => {
+  const makePlayer = ({ ytTrack, dzTrack }) => ({
+    node: { options: { id: "explicit-routing-test" }, info: { sourceManagers: ["youtube", "spotify", "deezer", "soundcloud"] } },
+    search: async ({ source }) => {
+      if (source === "ytmsearch") return { loadType: ytTrack ? "search" : "empty", tracks: ytTrack ? [ytTrack] : [] };
+      if (source === "dzsearch") return { loadType: dzTrack ? "search" : "empty", tracks: dzTrack ? [dzTrack] : [] };
+      return { loadType: "empty", tracks: [] };
+    },
+  });
+
+  // 1. Explicit song (even when YouTube also matches cleanly!) -> prefers Deezer (non-YouTube)
+  const explicitPlayer = makePlayer({
+    ytTrack: { encoded: "yt-nlu", info: { title: "Not Like Us", author: "Kendrick Lamar", duration: 274_000, sourceName: "ytmusic", identifier: "yt1" }, pluginInfo: {} },
+    dzTrack: { encoded: "dz-nlu", info: { title: "Not Like Us", author: "Kendrick Lamar", duration: 274_000, sourceName: "deezer", identifier: "dz1" }, pluginInfo: {} },
+  });
+  const explicitRes = await searchAllSources(explicitPlayer, "Not Like Us Kendrick Lamar", { id: "u1" }, {
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({
+        data: [{ title: "Not Like Us", artist: { name: "Kendrick Lamar" }, explicit_lyrics: true }],
+      }),
+    }),
+  });
+  assert.equal(explicitRes.isExplicit, true);
+  assert.equal(explicitRes.bestTrack.encoded, "dz-nlu");
+
+  // 2. Non-explicit song when YouTube matches cleanly -> prefers YouTube
+  const cleanPlayer = makePlayer({
+    ytTrack: { encoded: "yt-bagyo", info: { title: "ako ang bagyo", author: "SHEAN", duration: 274_000, sourceName: "ytmusic", identifier: "yt2" }, pluginInfo: {} },
+    dzTrack: { encoded: "dz-bagyo", info: { title: "ako ang bagyo", author: "Shean", duration: 274_000, sourceName: "deezer", identifier: "dz2" }, pluginInfo: {} },
+  });
+  const cleanRes = await searchAllSources(cleanPlayer, "ako ang bagyo shean", { id: "u1" }, {
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({
+        data: [{ title: "ako ang bagyo", artist: { name: "Shean" }, explicit_lyrics: false }],
+      }),
+    }),
+  });
+  assert.equal(cleanRes.isExplicit, false);
+  assert.equal(cleanRes.bestTrack.encoded, "yt-bagyo");
+
+  // 3. Non-explicit song when YouTube cannot find it -> falls back to Deezer/alternative source
+  const ytMissPlayer = makePlayer({
+    ytTrack: null,
+    dzTrack: { encoded: "dz-blinding", info: { title: "Blinding Lights", author: "The Weeknd", duration: 200_000, sourceName: "deezer", identifier: "dz3" }, pluginInfo: {} },
+  });
+  const missRes = await searchAllSources(ytMissPlayer, "Blinding Lights The Weeknd", { id: "u1" }, {
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({
+        data: [{ title: "Blinding Lights", artist: { name: "The Weeknd" }, explicit_lyrics: false }],
+      }),
+    }),
+  });
+  assert.equal(missRes.isExplicit, false);
+  assert.equal(missRes.bestTrack.encoded, "dz-blinding");
+
+  // 4. SoundCloud Go+ 30s preview snip penalized below full track
+  const fullSc = { info: { title: "Blinding Lights", author: "The Weeknd", duration: 200_000, sourceName: "soundcloud" }, pluginInfo: { policy: "ALLOW", playback: "FULL" } };
+  const snipSc = { info: { title: "Blinding Lights", author: "The Weeknd", duration: 200_000, sourceName: "soundcloud" }, pluginInfo: { policy: "SNIP", playback: "PARTIAL" } };
+  assert.ok(scoreTrackRelevance(fullSc, "Blinding Lights The Weeknd") > scoreTrackRelevance(snipSc, "Blinding Lights The Weeknd") + 50);
 });

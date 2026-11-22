@@ -425,13 +425,18 @@ export function scoreTrackRelevance(
   }
   score -= Math.min(variantPenalty, 55);
 
-  // 5. Duration sanity (penalize 30s previews and 1-hour loops unless requested)
+  // 5. Duration & preview sanity (penalize 30s previews, SoundCloud Go+ snips, and 1-hour loops)
   const duration = Number(track.info.duration) || 0;
   if (!track.info.isStream && duration > 0) {
     if (duration < 35_000) score -= 50;
     if (duration > 15 * 60_000 && !/\b(mix|hour|album|set|medley|playlist)\b/i.test(normQuery)) {
       score -= 40;
     }
+  }
+  const scPolicy = String(track.pluginInfo?.policy || "").toUpperCase();
+  const scPlayback = String(track.pluginInfo?.playback || "").toUpperCase();
+  if (scPolicy === "SNIP" || scPlayback === "PARTIAL") {
+    score -= 80;
   }
 
   // 6. Mild preference for top search rank from the platform itself
@@ -529,14 +534,70 @@ function findMatchingDirectTrackInBatch(spotifyTrack, candidates, failedSources)
   return best;
 }
 
+const EXPLICIT_TEXT_RE = /\b(explicit|uncensored|dirty)\b/i;
+
+/**
+ * Lightweight keyless explicit-lyrics check via Deezer's public catalog search API (~250ms),
+ * run in parallel with the 4 Lavalink searches so it adds zero latency.
+ */
+async function checkExplicitViaDeezerApi(query, fetchImpl = fetch, timeoutMs = 1300) {
+  if (typeof fetchImpl !== "function") return false;
+  const queryTokens = tokenizeQuery(query);
+  if (queryTokens.length === 0) return false;
+
+  try {
+    const res = await fetchImpl(
+      `https://api.deezer.com/search?limit=2&q=${encodeURIComponent(query)}`,
+      {
+        headers: { Accept: "application/json", "User-Agent": "DiscordMusicBot/1.0" },
+        signal: AbortSignal.timeout(timeoutMs),
+      },
+    );
+    if (!res?.ok) return false;
+    const json = await res.json();
+    const items = Array.isArray(json?.data) ? json.data : [];
+    for (const item of items) {
+      if (!item?.title) continue;
+      const combined = normalizeMatchText(`${item.title} ${item.artist?.name || ""}`);
+      const hits = queryTokens.filter((tok) => combined.includes(tok)).length;
+      if (hits / queryTokens.length >= 0.5) {
+        return Boolean(item.explicit_lyrics);
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Detect whether the matched song is explicit from query text, track titles/metadata,
+ * or the parallel Deezer catalog explicit_lyrics flag.
+ */
+export function detectExplicitFromCandidates(query, scoredCandidates, apiExplicitFlag = false) {
+  if (EXPLICIT_TEXT_RE.test(String(query || ""))) return true;
+  if (apiExplicitFlag) return true;
+
+  const topScore = scoredCandidates?.[0]?.score ?? 0;
+  for (const c of scoredCandidates || []) {
+    if (c.score < Math.max(40, topScore - 35)) continue;
+    const t = c.track;
+    if (t?.info?.isExplicit === true || t?.pluginInfo?.isExplicit === true) return true;
+    if (EXPLICIT_TEXT_RE.test(String(t?.info?.title || ""))) return true;
+  }
+  return false;
+}
+
 /**
  * Search YouTube Music, Spotify, Deezer, and SoundCloud IN PARALLEL and rank every result
- * by exact-match relevance so both `d!play` and `d!search` find the exact song requested.
+ * by exact-match relevance:
+ * - Explicit songs prefer healthy non-YouTube sources (Deezer / SoundCloud / Spotify) to avoid YouTube login/age gates.
+ * - Non-explicit songs prefer YouTube when YouTube finds a strong match, falling back to alternative sources otherwise.
  *
  * @param {any} player
  * @param {string} query
  * @param {any} requester
- * @param {{ preferredSource?: string, perSourceLimit?: number, maxTotal?: number, timeoutMs?: number, materializeWinner?: boolean }} [opts]
+ * @param {{ preferredSource?: string, perSourceLimit?: number, maxTotal?: number, timeoutMs?: number, materializeWinner?: boolean, fetchImpl?: typeof fetch }} [opts]
  */
 export async function searchAllSources(
   player,
@@ -548,6 +609,7 @@ export async function searchAllSources(
     maxTotal = 8,
     timeoutMs = 2600,
     materializeWinner = true,
+    fetchImpl = fetch,
   } = {},
 ) {
   const nodeSources = getNodeSources(player);
@@ -564,13 +626,16 @@ export async function searchAllSources(
     activeSpecs = MULTI_SOURCE_SEARCH_SET;
   }
 
-  // Fire all 4 platform searches in parallel with a tight per-source timeout
-  const batches = await Promise.all(
-    activeSpecs.map(async (spec) => {
-      const tracks = await searchSourceWithTimeout(player, query, spec.prefix, requester, timeoutMs);
-      return { spec, tracks: Array.isArray(tracks) ? tracks.slice(0, perSourceLimit) : [] };
-    }),
-  );
+  // Fire all 4 platform searches + keyless explicit metadata check IN PARALLEL (zero extra latency!)
+  const [batches, apiExplicit] = await Promise.all([
+    Promise.all(
+      activeSpecs.map(async (spec) => {
+        const tracks = await searchSourceWithTimeout(player, query, spec.prefix, requester, timeoutMs);
+        return { spec, tracks: Array.isArray(tracks) ? tracks.slice(0, perSourceLimit) : [] };
+      }),
+    ),
+    checkExplicitViaDeezerApi(query, fetchImpl, Math.min(1300, timeoutMs)),
+  ]);
 
   // If no strong match came back (e.g. YouTube-only upload/live video not on YTM/Spotify/Deezer/SC),
   // run a fast standard `ytsearch` supplement when YouTube isn't blocked.
@@ -613,6 +678,7 @@ export async function searchAllSources(
       bestTrack: null,
       rankedTracks: [],
       respondedSources: [],
+      isExplicit: false,
     };
   }
 
@@ -623,6 +689,8 @@ export async function searchAllSources(
 
   // Global relevance sort
   scoredInitial.sort((a, b) => b.score - a.score);
+
+  const isExplicit = detectExplicitFromCandidates(query, scoredInitial, apiExplicit);
 
   // Build diverse top list for `d!search` (best track per platform first, then top remaining by score)
   // Deduplicate identical (source + title + author) album/single duplicates from the same platform!
@@ -658,12 +726,48 @@ export async function searchAllSources(
     diverse.push(item.track);
   }
 
-  // Pick #1 winning track for `d!play`, pairing Spotify seamlessly with a direct stream if needed
-  let bestTrack = scoredInitial[0].track;
+  // Explicit-aware winner selection for `d!play`:
+  // - Explicit song -> prefer healthy non-YouTube sources (Deezer / SoundCloud / Spotify)
+  // - Non-explicit song -> prefer YouTube when YouTube found a strong match; else fall back to best alternative source
+  const topScore = scoredInitial[0].score;
+  let winnerItem = scoredInitial[0];
+
+  if (isExplicit) {
+    const nonYtCandidate = scoredInitial.find((c) => {
+      const mgr = normalizeSourceName(c.track?.info?.sourceName) || c.spec.manager;
+      return (
+        mgr !== "youtube" &&
+        !failedSources.has(mgr) &&
+        c.score >= Math.max(45, topScore - 35)
+      );
+    });
+    if (nonYtCandidate) {
+      winnerItem = nonYtCandidate;
+    }
+  } else if (!failedSources.has("youtube")) {
+    const ytCandidate = scoredInitial.find((c) => {
+      const mgr = normalizeSourceName(c.track?.info?.sourceName) || c.spec.manager;
+      return mgr === "youtube" && c.score >= Math.max(55, topScore - 25);
+    });
+    if (ytCandidate) {
+      winnerItem = ytCandidate;
+    }
+  }
+
+  let bestTrack = winnerItem.track;
   const bestSrc = normalizeSourceName(bestTrack?.info?.sourceName);
 
   if (materializeWinner && (bestSrc === "spotify" || bestSrc === "applemusic")) {
-    const batchMatch = findMatchingDirectTrackInBatch(bestTrack, scoredInitial, failedSources);
+    // For explicit songs, prefer pairing Spotify with a non-YouTube direct stream first
+    const batchPool = isExplicit
+      ? scoredInitial.filter(
+          (c) => (normalizeSourceName(c.track?.info?.sourceName) || c.spec.manager) !== "youtube",
+        )
+      : scoredInitial;
+    const batchMatch =
+      findMatchingDirectTrackInBatch(bestTrack, batchPool, failedSources) ||
+      (isExplicit ? findMatchingDirectTrackInBatch(bestTrack, scoredInitial, failedSources) : null);
+
     if (batchMatch) {
       bestTrack = tagOriginMetadata(batchMatch, {
         title: bestTrack.info.title,
@@ -675,7 +779,12 @@ export async function searchAllSources(
         platform: bestSrc,
       });
     } else {
-      bestTrack = await materializeDirectTrack(player, bestTrack, requester, preferredSource);
+      bestTrack = await materializeDirectTrack(
+        player,
+        bestTrack,
+        requester,
+        isExplicit ? "dzsearch" : preferredSource,
+      );
     }
   }
 
@@ -683,6 +792,7 @@ export async function searchAllSources(
     bestTrack,
     rankedTracks: diverse,
     respondedSources,
+    isExplicit,
   };
 }
 
@@ -1393,6 +1503,7 @@ export async function resolveQuery({
       perSourceLimit: 3,
       maxTotal: 8,
       materializeWinner: true,
+      fetchImpl,
     });
     const tracks = multi.bestTrack
       ? [multi.bestTrack, ...multi.rankedTracks.filter((t) => t !== multi.bestTrack)]

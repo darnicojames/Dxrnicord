@@ -363,7 +363,6 @@ export function registerLavalinkEvents(client, config, guildSettings, voiceTrack
       ? `Radio 24/7: ${info.title}`.slice(0, 120)
       : formatVoiceStatusText(info.title, info.author);
     setVoiceChannelStatus(client, player.voiceChannelId, vcStatus).catch(() => {});
-    clearPreviousControls(player).catch(() => {});
 
     // Avoid spamming repeated Now Playing cards on silent 24/7 radio auto-reconnects
     if (isRadio && Number(player.getData("_radioRetryCount") || 0) > 0) {
@@ -371,7 +370,8 @@ export function registerLavalinkEvents(client, config, guildSettings, voiceTrack
     }
 
     const isPrebuffering = Boolean(player.getData("_prebuffering"));
-    const msg = await sendToPlayerChannel(client, player, {
+    const isRecovered = Boolean(track.pluginInfo?.clientData?._retriedFallback);
+    const nowPlayingPayload = {
       embeds: [
         buildNowPlayingEmbed(player, track, {
           autoplay: prefs.autoplay,
@@ -381,7 +381,20 @@ export function registerLavalinkEvents(client, config, guildSettings, voiceTrack
         }),
       ],
       components: [buildPlayerControls(player, { pausedOverride: isPrebuffering ? false : undefined })],
-    });
+    };
+
+    // On instant track recovery, edit the existing Now Playing card in place instead of posting a duplicate!
+    const existingMsg = player.getData("nowPlayingMessage");
+    if (isRecovered && existingMsg && typeof existingMsg.edit === "function") {
+      const edited = await existingMsg.edit(nowPlayingPayload).catch(() => null);
+      if (edited) {
+        player.setData("nowPlayingMessage", edited);
+        return;
+      }
+    }
+
+    clearPreviousControls(player).catch(() => {});
+    const msg = await sendToPlayerChannel(client, player, nowPlayingPayload);
 
     if (msg) {
       player.setData("nowPlayingMessage", msg);
