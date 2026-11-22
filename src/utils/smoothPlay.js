@@ -1,14 +1,17 @@
 /**
  * Smooth Start Pre-Buffering for Lavalink v4 / NodeLink v3.
  *
- * Starting a track with `paused: true` lets Lavaplayer open the upstream CDN stream
- * and pre-fill its internal AudioFrameBuffer in silence (~450ms on Lavalink, ~200ms on NodeLink)
- * before unpausing, eliminating choppy/stuttering first 1-2 seconds of songs.
- * Uses a monotonic nonce so track errors or rapid skips never trigger stale resume() calls.
+ * - On NodeLink v3: plays immediately with `paused: false` (native streaming, no cold-start stutter).
+ * - On Java Lavalink v4: starts with `paused: true` so Lavaplayer fills its internal
+ *   AudioFrameBuffer in silence (~350ms), then sends an explicit REST `paused: false`
+ *   directly via `player.node.updatePlayer(...)`.
+ *
+ * IMPORTANT: In `lavalink-client` v2, `player.play({ paused: true })` does NOT set `player.paused = true`,
+ * and `TrackStartEvent` forces `player.paused = false` even while Lavalink is still paused!
+ * Therefore we NEVER gate the unpause on `player.paused` and NEVER rely on `player.resume()`.
  */
 
-const DEFAULT_LAVALINK_PREBUFFER_MS = 450;
-const DEFAULT_NODELINK_PREBUFFER_MS = 200;
+const DEFAULT_LAVALINK_PREBUFFER_MS = 350;
 
 /**
  * Invalidate any in-flight smoothPlay pre-buffer timer (called on trackError / trackStuck / stop).
@@ -23,7 +26,7 @@ export function cancelPendingPrebuffer(player) {
 }
 
 /**
- * Play the next (or specified) track with quiet pre-buffering on seekable/non-stream tracks.
+ * Play the next (or specified) track smoothly without ever leaving Lavalink stuck paused.
  *
  * @param {any} player
  * @param {Record<string, any>} [playOptions]
@@ -32,11 +35,8 @@ export function cancelPendingPrebuffer(player) {
 export async function smoothPlay(player, playOptions = {}, { prebufferMs } = {}) {
   if (!player) return;
 
-  const defaultMs =
-    player.node?.nodeType === "NodeLink"
-      ? DEFAULT_NODELINK_PREBUFFER_MS
-      : DEFAULT_LAVALINK_PREBUFFER_MS;
-  const waitMs = prebufferMs ?? defaultMs;
+  const isNodeLink = player.node?.nodeType === "NodeLink";
+  const waitMs = prebufferMs ?? (isNodeLink ? 0 : DEFAULT_LAVALINK_PREBUFFER_MS);
 
   const targetTrack = playOptions.clientTrack || player.queue?.tracks?.[0] || player.queue?.current;
   const isLiveStream = Boolean(targetTrack?.info?.isStream);
@@ -44,10 +44,11 @@ export async function smoothPlay(player, playOptions = {}, { prebufferMs } = {})
   const nonce = (Number(player.getData("_smoothPlayNonce")) || 0) + 1;
   player.setData("_smoothPlayNonce", nonce);
 
-  // Live radio streams should start directly without pause/resume
+  // NodeLink and live radio streams play directly with explicit `paused: false`
   if (isLiveStream || waitMs <= 0) {
     player.deleteData("_prebuffering");
-    await player.play(playOptions);
+    player.paused = false;
+    await player.play({ ...playOptions, paused: false });
     return;
   }
 
@@ -61,15 +62,23 @@ export async function smoothPlay(player, playOptions = {}, { prebufferMs } = {})
       t.unref?.();
     });
 
-    // Only unpause if this exact smoothPlay call is still active and user didn't pause/skip/error
+    // Unconditionally unpause on the server if this smoothPlay call is still active
+    // and the user didn't explicitly pause, skip, stop, or hit a track error.
     if (
       player.getData("_smoothPlayNonce") === nonce &&
       player.connected &&
-      player.paused &&
       !player.getData("_userPausedDuringPrebuffer") &&
       !player.getData("internal_destroystatus")
     ) {
-      await player.resume();
+      player.paused = false;
+      if (typeof player.node?.updatePlayer === "function") {
+        await player.node.updatePlayer({
+          guildId: player.guildId,
+          playerOptions: { paused: false },
+        });
+      } else if (typeof player.resume === "function") {
+        await player.resume();
+      }
     }
   } finally {
     if (player.getData("_smoothPlayNonce") === nonce) {

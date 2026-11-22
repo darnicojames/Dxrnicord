@@ -9,32 +9,43 @@ import {
 } from "../src/services/nodeDiscovery.js";
 import { cancelPendingPrebuffer, smoothPlay } from "../src/utils/smoothPlay.js";
 
-test("smoothPlay pre-buffers paused tracks and resumes automatically, skipping live streams", async () => {
+test("smoothPlay unpauses Lavalink via updatePlayer even when TrackStartEvent forces player.paused=false, and plays NodeLink/streams directly", async () => {
   const events = [];
   const data = new Map();
   const fakePlayer = {
+    guildId: "g-1",
     connected: true,
     paused: false,
+    node: {
+      nodeType: "Lavalink",
+      updatePlayer: async ({ playerOptions }) => {
+        events.push(`updatePlayer:paused=${playerOptions?.paused}`);
+      },
+    },
     queue: { tracks: [{ info: { isStream: false } }], current: null },
     getData: (k) => data.get(k),
     setData: (k, v) => data.set(k, v),
     deleteData: (k) => data.delete(k),
     play: async (opts) => {
       events.push(`play:paused=${Boolean(opts?.paused)}`);
-      fakePlayer.paused = Boolean(opts?.paused);
-    },
-    resume: async () => {
-      events.push("resume");
+      // Simulate real lavalink-client behavior: TrackStartEvent forces player.paused = false!
       fakePlayer.paused = false;
     },
   };
 
   await smoothPlay(fakePlayer, {}, { prebufferMs: 15 });
-  assert.deepEqual(events, ["play:paused=true", "resume"]);
+  assert.deepEqual(events, ["play:paused=true", "updatePlayer:paused=false"]);
   assert.equal(data.get("_prebuffering"), undefined);
 
-  // Live stream skips prebuffer pause/resume
+  // NodeLink plays directly with paused=false (no silent pre-buffer pause)
   events.length = 0;
+  fakePlayer.node.nodeType = "NodeLink";
+  await smoothPlay(fakePlayer, {});
+  assert.deepEqual(events, ["play:paused=false"]);
+
+  // Live stream skips prebuffer pause/resume on Lavalink too
+  events.length = 0;
+  fakePlayer.node.nodeType = "Lavalink";
   fakePlayer.queue.tracks = [{ info: { isStream: true } }];
   await smoothPlay(fakePlayer, {}, { prebufferMs: 15 });
   assert.deepEqual(events, ["play:paused=false"]);
