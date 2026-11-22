@@ -124,6 +124,7 @@ export const searchCommand = {
           preferredSource,
           perSourceLimit: 3,
           maxTotal: 8,
+          timeoutMs: 1200,
           materializeWinner: false,
         });
         topTracks = multi.rankedTracks;

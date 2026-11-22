@@ -423,3 +423,54 @@ test("searchAllSources routes explicit songs to non-YouTube and non-explicit son
   const snipSc = { info: { title: "Blinding Lights", author: "The Weeknd", duration: 200_000, sourceName: "soundcloud" }, pluginInfo: { policy: "SNIP", playback: "PARTIAL" } };
   assert.ok(scoreTrackRelevance(fullSc, "Blinding Lights The Weeknd") > scoreTrackRelevance(snipSc, "Blinding Lights The Weeknd") + 50);
 });
+
+test("searchAllSources soft cap cuts off hanging sources immediately once fast sources respond, and rescues slower nodes", async () => {
+  // Fast source finishes in 5ms while another hangs for 2000ms -> returns right at soft cap (~40ms)
+  const mixedPlayer = {
+    node: { options: { id: "softcap-test" }, info: { sourceManagers: ["youtube", "deezer"] } },
+    search: async ({ source }) => {
+      if (source === "ytmsearch") {
+        return {
+          loadType: "search",
+          tracks: [{ encoded: "yt-fast", info: { title: "luther", author: "Kendrick Lamar", duration: 177_000, sourceName: "ytmusic", identifier: "y1" }, pluginInfo: {} }],
+        };
+      }
+      await new Promise((r) => {
+        const t = setTimeout(r, 2000);
+        t.unref?.();
+      });
+      return { loadType: "empty", tracks: [] };
+    },
+  };
+
+  const t0 = Date.now();
+  const res = await searchAllSources(mixedPlayer, "luther kendrick", { id: "u1" }, {
+    timeoutMs: 40,
+    hardTimeoutMs: 500,
+    fetchImpl: async () => ({ ok: false }),
+  });
+  const elapsed = Date.now() - t0;
+  assert.equal(res.bestTrack.encoded, "yt-fast");
+  assert.ok(elapsed < 250, `Expected soft cap cut-off (<250ms), got ${elapsed}ms`);
+
+  // If 0 sources finish by soft cap (30ms) but one finishes at 70ms -> rescues cleanly instead of returning empty!
+  const slowPlayer = {
+    node: { options: { id: "rescue-test" }, info: { sourceManagers: ["youtube"] } },
+    search: async () => {
+      await new Promise((r) => {
+        const t = setTimeout(r, 65);
+        t.unref?.();
+      });
+      return {
+        loadType: "search",
+        tracks: [{ encoded: "yt-rescued", info: { title: "luther", author: "Kendrick Lamar", duration: 177_000, sourceName: "ytmusic", identifier: "y2" }, pluginInfo: {} }],
+      };
+    },
+  };
+  const rescued = await searchAllSources(slowPlayer, "luther kendrick", { id: "u1" }, {
+    timeoutMs: 25,
+    hardTimeoutMs: 400,
+    fetchImpl: async () => ({ ok: false }),
+  });
+  assert.equal(rescued.bestTrack.encoded, "yt-rescued");
+});

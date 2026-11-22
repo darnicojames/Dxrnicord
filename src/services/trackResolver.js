@@ -480,6 +480,80 @@ function searchSourceWithTimeout(player, query, source, requester, timeoutMs) {
 }
 
 /**
+ * Fire all platform searches in parallel with a snappy 1.0s soft cap:
+ * - Resolves immediately if all platforms finish earlier than `softCapMs`.
+ * - At `softCapMs` (1.0s), returns right away if at least one platform already returned tracks
+ *   (so one sluggish source never holds up playback!).
+ * - If 0 tracks arrived yet at `softCapMs` (e.g. distant backup server), keeps the in-flight
+ *   searches racing and returns the instant the first non-empty source answers (up to `hardCapMs`).
+ */
+async function raceParallelSourceSearches(
+  player,
+  query,
+  activeSpecs,
+  requester,
+  perSourceLimit,
+  softCapMs = 1000,
+  hardCapMs = 2200,
+) {
+  const results = activeSpecs.map((spec) => ({ spec, tracks: [] }));
+  let hasAnyTracks = false;
+  let completedCount = 0;
+  let softElapsed = false;
+  let resolveWaiter = null;
+
+  const finishIfReady = () => {
+    if (resolveWaiter) {
+      const fn = resolveWaiter;
+      resolveWaiter = null;
+      fn();
+    }
+  };
+
+  let softTimer = null;
+  let hardTimer = null;
+
+  const waitPromise = new Promise((resolve) => {
+    resolveWaiter = resolve;
+    softTimer = setTimeout(() => {
+      softElapsed = true;
+      if (hasAnyTracks) finishIfReady();
+    }, softCapMs);
+    softTimer.unref?.();
+
+    hardTimer = setTimeout(() => {
+      finishIfReady();
+    }, Math.max(softCapMs, hardCapMs));
+    hardTimer.unref?.();
+  });
+
+  activeSpecs.forEach((spec, idx) => {
+    Promise.resolve()
+      .then(() => player.search({ query, source: spec.prefix }, requester))
+      .then((res) => {
+        const tracks =
+          res && res.loadType !== "empty" && res.loadType !== "error" && res.tracks?.length > 0
+            ? res.tracks.slice(0, perSourceLimit)
+            : [];
+        results[idx].tracks = tracks;
+        if (tracks.length > 0) hasAnyTracks = true;
+      })
+      .catch(() => {})
+      .finally(() => {
+        completedCount += 1;
+        if (completedCount >= activeSpecs.length || (softElapsed && hasAnyTracks)) {
+          finishIfReady();
+        }
+      });
+  });
+
+  await waitPromise;
+  if (softTimer) clearTimeout(softTimer);
+  if (hardTimer) clearTimeout(hardTimer);
+  return results;
+}
+
+/**
  * If Spotify won the relevance ranking, try pairing it with an already-fetched healthy direct
  * stream from the same parallel batch (exact ISRC or matching title+artist+duration) for ZERO
  * extra network round-trips!
@@ -607,7 +681,8 @@ export async function searchAllSources(
     preferredSource = "ytmsearch",
     perSourceLimit = 3,
     maxTotal = 8,
-    timeoutMs = 1800,
+    timeoutMs = 1000,
+    hardTimeoutMs = 2200,
     materializeWinner = true,
     fetchImpl = fetch,
   } = {},
@@ -626,15 +701,18 @@ export async function searchAllSources(
     activeSpecs = MULTI_SOURCE_SEARCH_SET;
   }
 
-  // Fire all 4 platform searches + keyless explicit metadata check IN PARALLEL (zero extra latency!)
+  // Fire all 4 platform searches + keyless explicit metadata check IN PARALLEL with a 1.0s soft cap!
   const [batches, apiExplicit] = await Promise.all([
-    Promise.all(
-      activeSpecs.map(async (spec) => {
-        const tracks = await searchSourceWithTimeout(player, query, spec.prefix, requester, timeoutMs);
-        return { spec, tracks: Array.isArray(tracks) ? tracks.slice(0, perSourceLimit) : [] };
-      }),
+    raceParallelSourceSearches(
+      player,
+      query,
+      activeSpecs,
+      requester,
+      perSourceLimit,
+      timeoutMs,
+      hardTimeoutMs,
     ),
-    checkExplicitViaDeezerApi(query, fetchImpl, Math.min(1300, timeoutMs)),
+    checkExplicitViaDeezerApi(query, fetchImpl, Math.min(900, timeoutMs)),
   ]);
 
   // If no strong match came back (e.g. YouTube-only upload/live video not on YTM/Spotify/Deezer/SC),

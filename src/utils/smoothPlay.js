@@ -11,7 +11,7 @@
  * Therefore we NEVER gate the unpause on `player.paused` and NEVER rely on `player.resume()`.
  */
 
-const DEFAULT_LAVALINK_PREBUFFER_MS = 350;
+const DEFAULT_LAVALINK_PREBUFFER_MS = 250;
 
 /**
  * Invalidate any in-flight smoothPlay pre-buffer timer (called on trackError / trackStuck / stop).

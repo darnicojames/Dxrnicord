@@ -7,8 +7,8 @@
  * resolution!) eliminates intro stuttering and clipped first seconds.
  */
 
-const DEFAULT_VOICE_TIMEOUT_MS = 2500;
-const DAVE_SETTLE_MS = 400;
+const DEFAULT_VOICE_TIMEOUT_MS = 2200;
+const DAVE_SETTLE_MS = 250;
 
 export class VoiceReadinessTracker {
   /**
