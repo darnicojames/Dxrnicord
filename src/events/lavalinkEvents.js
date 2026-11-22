@@ -307,6 +307,16 @@ export function registerLavalinkEvents(client, config, guildSettings, voiceTrack
   client.lavalink.nodeManager.on("connect", (node) => {
     const ver = node.info?.version?.semver || "v4";
     console.log(`[Lavalink] Node "${node.options.id}" connected (${node.nodeType} ${ver}).`);
+    // Enable Lavalink v4 Session Resuming (60s) so brief network blips don't drop active VC playback
+    if (typeof node.updateSession === "function" && node.sessionId) {
+      node.updateSession(true, 60).catch(() => {});
+    }
+  });
+
+  client.lavalink.nodeManager.on("raw", (node, payload) => {
+    if (payload?.op === "ready" && payload?.sessionId && typeof node?.updateSession === "function") {
+      node.updateSession(true, 60).catch(() => {});
+    }
   });
 
   client.lavalink.nodeManager.on("reconnecting", (node) => {

@@ -10,6 +10,35 @@ const nodePenalties = new Map();
 /** @type {Map<string, Map<string, number>>} */
 const nodeFailedSources = new Map();
 
+/** @type {Map<string, number>} */
+const nodeLatencyHints = new Map();
+
+/**
+ * Store a measured warm RTT latency hint (ms) for a node (used when WS ping heartbeats are disabled).
+ * @param {string | undefined} nodeId
+ * @param {number} latencyMs
+ */
+export function recordNodeLatency(nodeId, latencyMs) {
+  if (!nodeId || !Number.isFinite(latencyMs) || latencyMs <= 0) return;
+  nodeLatencyHints.set(nodeId, Math.round(latencyMs));
+}
+
+/**
+ * Return the best available ping/latency estimate (ms) for a connected node.
+ * @param {any} node
+ * @returns {number | null}
+ */
+export function getNodeLatency(node) {
+  if (Number.isFinite(node?.heartBeatPing) && node.heartBeatPing > 0) {
+    return Math.round(node.heartBeatPing);
+  }
+  const id = node?.options?.id;
+  if (id && nodeLatencyHints.has(id)) {
+    return nodeLatencyHints.get(id);
+  }
+  return null;
+}
+
 /**
  * Fallback seed list of well-known community DAVE-compatible Lavalink v4 / NodeLink v3 nodes
  * in case the live directory API is temporarily unavailable.
@@ -264,7 +293,7 @@ export function pickFastestConnectedNode(client, { excludeNodeIds } = {}) {
   connected.sort((a, b) => {
     const scoreNode = (n) => {
       const id = n.options?.id;
-      const ping = Number.isFinite(n.heartBeatPing) && n.heartBeatPing > 0 ? n.heartBeatPing : 350;
+      const ping = getNodeLatency(n) ?? 350;
       const cpuLoad = getServerCpuLoad(n.stats);
       const players = Number(n.stats?.playingPlayers) || 0;
       const stutterPenalty = computeFrameStutterPenalty(n.stats);
@@ -599,10 +628,13 @@ export function toLavalinkNodeOptions(node, nodeType = NodeType.Lavalink) {
     authorization: node.authorization,
     secure: Boolean(node.secure),
     nodeType,
-    retryAmount: 5,
-    retryDelay: 10_000,
-    requestSignalTimeoutMS: 8_000,
-    heartBeatInterval: 20_000,
+    retryAmount: 10,
+    retryDelay: 5_000,
+    requestSignalTimeoutMS: 10_000,
+    // Disable aggressive 1-strike RFC-6455 WS ping killer (many public proxies drop pong frames,
+    // causing false-positive `code=500 Node-Heartbeat-Timeout` disconnects); rely on Lavalink's
+    // native 65s `/stats` liveness watchdog (`enablePingOnStatsCheck: true`) instead.
+    heartBeatInterval: 0,
     enablePingOnStatsCheck: true,
     autoChecks: {
       pluginValidations: false,
@@ -643,6 +675,7 @@ export async function resolveStartupNodes(config, { fetchImpl = fetch } = {}) {
             `[Nodes] Custom node "${probe.node.id}" verified (${probe.nodeType} ${probe.version.semver}, ${probe.latencyMs}ms).`,
           );
         }
+        recordNodeLatency(probe.node.id, probe.latencyMs);
         finalNodes.push(toLavalinkNodeOptions(probe.node, probe.nodeType));
       } else {
         console.warn(
@@ -695,6 +728,7 @@ export async function resolveStartupNodes(config, { fetchImpl = fetch } = {}) {
         cpuVal !== undefined
           ? `${(Number(cpuVal) * 100).toFixed(1)}% CPU, ${probe.stats.playingPlayers ?? 0} playing`
           : "stats n/a";
+      recordNodeLatency(probe.node.id, probe.latencyMs);
       console.log(
         `[Nodes] Selected "${probe.node.id}" (${probe.nodeType} ${probe.version.semver}, DAVE=${probe.daveCompatible ? "yes" : "unverified"}, ${probe.latencyMs}ms, ${load})`,
       );

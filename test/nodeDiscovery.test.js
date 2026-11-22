@@ -6,6 +6,7 @@ import {
   extractProviderKey,
   fetchPublicNodeCandidates,
   getNodeFailedSources,
+  getNodeLatency,
   getNodePenalty,
   isDaveCompatible,
   isNodeLinkInfo,
@@ -16,8 +17,10 @@ import {
   pickFastestConnectedNode,
   probeNode,
   recordNodeIssue,
+  recordNodeLatency,
   resolveStartupNodes,
   scoreProbedNode,
+  toLavalinkNodeOptions,
 } from "../src/services/nodeDiscovery.js";
 import { VoiceReadinessTracker } from "../src/utils/voiceReady.js";
 
@@ -289,4 +292,21 @@ test("pickFastestConnectedNode respects excludeNodeIds for automatic cross-node 
   const fakeClient = { lavalink: { nodeManager: { nodes: new Map([["1", n1], ["2", n2]]) } } };
   assert.equal(pickFastestConnectedNode(fakeClient).options.id, "primary-1");
   assert.equal(pickFastestConnectedNode(fakeClient, { excludeNodeIds: ["primary-1"] }).options.id, "backup-2");
+});
+
+test("toLavalinkNodeOptions disables false-positive WS ping killer and records warm RTT hints", () => {
+  const opts = toLavalinkNodeOptions({
+    id: "stable-node",
+    host: "lava.example.com",
+    port: 443,
+    authorization: "pw",
+    secure: true,
+  });
+  assert.equal(opts.heartBeatInterval, 0);
+  assert.equal(opts.enablePingOnStatsCheck, true);
+  assert.ok(opts.retryAmount >= 10);
+
+  recordNodeLatency("stable-node", 48.6);
+  assert.equal(getNodeLatency({ options: { id: "stable-node" }, heartBeatPing: 0 }), 49);
+  assert.equal(getNodeLatency({ options: { id: "stable-node" }, heartBeatPing: 25 }), 25);
 });

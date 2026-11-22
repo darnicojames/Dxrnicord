@@ -1,5 +1,6 @@
 import { EmbedBuilder } from "discord.js";
 import {
+  getNodeLatency,
   isDaveCompatible,
   parseServerVersion,
   pickFastestConnectedNode,
@@ -86,10 +87,8 @@ export const nodesCommand = {
           ? "DAVE ✅"
           : "DAVE ⚠️ (<4.2)"
         : "DAVE ?";
-      const ping =
-        Number.isFinite(node.heartBeatPing) && node.heartBeatPing > 0
-          ? `${node.heartBeatPing}ms`
-          : "n/a";
+      const latency = getNodeLatency(node);
+      const ping = latency !== null ? `${latency}ms` : "n/a";
       const players = node.stats?.playingPlayers ?? 0;
       const deficit = node.stats?.frameStats?.deficit ?? 0;
       const nulled = node.stats?.frameStats?.nulled ?? 0;
