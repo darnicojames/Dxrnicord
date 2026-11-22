@@ -607,7 +607,7 @@ export async function searchAllSources(
     preferredSource = "ytmsearch",
     perSourceLimit = 3,
     maxTotal = 8,
-    timeoutMs = 2600,
+    timeoutMs = 1800,
     materializeWinner = true,
     fetchImpl = fetch,
   } = {},

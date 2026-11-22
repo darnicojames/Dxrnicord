@@ -412,6 +412,12 @@ export function registerLavalinkEvents(client, config, guildSettings, voiceTrack
     const fullDiag = [rawMessage, rawCause, rawTrace].filter(Boolean).join("\n");
     const rawReason = rawMessage || rawCause || "Playback failed on audio server";
 
+    // Severe server hang/timeout (e.g. NodeLink `playerStateChange timed out after 15000ms`):
+    // record a second penalty strike immediately so tryRecoverTrack migrates off this slow node!
+    if (/timed out|playerStateChange|ETIMEDOUT|ECONNRESET|socket hang up/i.test(fullDiag)) {
+      recordNodeIssue(nodeId);
+    }
+
     const failedSource = normalizeSourceName(track?.info?.sourceName);
     if (failedSource) {
       markNodeSourceFailed(nodeId, failedSource);

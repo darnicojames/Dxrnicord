@@ -304,12 +304,15 @@ export function pickFastestConnectedNode(client, { excludeNodeIds } = {}) {
       const cpuPenalty = cpuLoad * 400;
       // Only penalize active player count if CPU or frame health is under pressure
       const playerPenalty = cpuLoad >= 0.35 || stutterPenalty > 0 ? Math.min(players * 6, 180) : 0;
-      const throttledSmallVpsPenalty = players <= 5 && cpuLoad >= 0.08 ? 110 : 0;
+      // Demote ghost/untested public nodes with 0 playing streams (often broken/hanging upstream)
+      const ghostNodePenalty = n.stats && players === 0 ? 180 : 0;
+      const throttledSmallVpsPenalty = players > 0 && players <= 5 && cpuLoad >= 0.08 ? 110 : 0;
 
       return (
         ping +
         cpuPenalty +
         playerPenalty +
+        ghostNodePenalty +
         throttledSmallVpsPenalty +
         stutterPenalty +
         davePenalty +
@@ -550,12 +553,61 @@ export function scoreProbedNode(probe) {
     score -= Math.min(playingPlayers * 4, 150);
   }
 
+  // Demote ghost/idle public nodes with 0 active players (frequently hanging/broken upstream)
+  if (probe.stats && playingPlayers === 0) {
+    score -= 180;
+  }
+
   // Penalize tiny/throttled VPS nodes burning high CPU with almost no active players
-  if (playingPlayers <= 5 && cpuLoad >= 0.08) {
+  if (playingPlayers > 0 && playingPlayers <= 5 && cpuLoad >= 0.08) {
     score -= 120;
   }
 
+  // Factor in real `/v4/loadtracks` search speed when probed on startup
+  if (probe.searchOk === false) {
+    score -= 260;
+  } else if (Number.isFinite(probe.searchLatencyMs)) {
+    score -= Math.min(probe.searchLatencyMs * 0.14, 240);
+  }
+
   return score;
+}
+
+/**
+ * Lightweight `/v4/loadtracks` speed probe on a candidate node to detect slow/hanging
+ * resolvers (e.g. nodes that respond fast on /v4/info but hang 4-15s on actual YouTube lookups).
+ */
+async function probeNodeSearchSpeed(probe, { fetchImpl = fetch, timeoutMs = 2500 } = {}) {
+  const n = probe.node;
+  const baseUrl = `${n.secure ? "https" : "http"}://${n.host}:${n.port}`;
+  const t0 = Date.now();
+  try {
+    const res = await fetchImpl(
+      `${baseUrl}/v4/loadtracks?identifier=${encodeURIComponent("ytmsearch:blinding lights")}`,
+      {
+        method: "GET",
+        headers: {
+          Authorization: n.authorization,
+          Accept: "application/json",
+          "User-Agent": "DiscordMusicBot/1.0",
+        },
+        signal: AbortSignal.timeout(timeoutMs),
+      },
+    );
+    const ms = Date.now() - t0;
+    if (!res?.ok) {
+      return { ...probe, searchOk: false, searchLatencyMs: ms };
+    }
+    const json = await res.json().catch(() => null);
+    // Treat mock /v4/info-only stubs cleanly (no loadType field) as neutral
+    if (!json || typeof json.loadType !== "string") {
+      return probe;
+    }
+    const ok = json.loadType !== "error";
+    return { ...probe, searchOk: ok, searchLatencyMs: ms };
+  } catch {
+    return { ...probe, searchOk: false, searchLatencyMs: Date.now() - t0 };
+  }
 }
 
 /**
@@ -701,16 +753,24 @@ export async function resolveStartupNodes(config, { fetchImpl = fetch } = {}) {
       (a, b) => scoreProbedNode(b) - scoreProbedNode(a),
     );
 
-    // Pick highest-scoring node per unique provider/domain first so failover spans distinct physical servers
+    // Pick top unique-provider candidates, then benchmark real search speed on the finalists
+    // so nodes that answer /v4/info fast but hang on actual track lookups get demoted!
     const seenProviders = new Set();
-    const ranked = [];
+    const finalists = [];
     for (const probe of sorted) {
-      if (ranked.length >= config.maxPublicNodes) break;
+      if (finalists.length >= config.maxPublicNodes + 2) break;
       const provider = extractProviderKey(probe.node.host);
       if (seenProviders.has(provider)) continue;
       seenProviders.add(provider);
-      ranked.push(probe);
+      finalists.push(probe);
     }
+
+    const benchmarked = await Promise.all(
+      finalists.map((p) => probeNodeSearchSpeed(p, { fetchImpl, timeoutMs: 2500 })),
+    );
+    const ranked = benchmarked
+      .sort((a, b) => scoreProbedNode(b) - scoreProbedNode(a))
+      .slice(0, config.maxPublicNodes);
 
     if (daveReady.length === 0 && healthy.length > 0) {
       console.warn(

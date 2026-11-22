@@ -309,4 +309,27 @@ test("toLavalinkNodeOptions disables false-positive WS ping killer and records w
   recordNodeLatency("stable-node", 48.6);
   assert.equal(getNodeLatency({ options: { id: "stable-node" }, heartBeatPing: 0 }), 49);
   assert.equal(getNodeLatency({ options: { id: "stable-node" }, heartBeatPing: 25 }), 25);
+
+  // Active node with fast search beats a 0-player ghost/hanging node even with slightly higher ping
+  const ghostSlowSearch = {
+    ok: true,
+    daveCompatible: true,
+    latencyMs: 30,
+    node: { secure: true },
+    sourceManagers: ["youtube", "deezer", "soundcloud", "spotify"],
+    stats: { cpu: { nodelinkLoad: 0.01 }, playingPlayers: 0 },
+    searchOk: false,
+    searchLatencyMs: 2500,
+  };
+  const activeFastSearch = {
+    ok: true,
+    daveCompatible: true,
+    latencyMs: 120,
+    node: { secure: true },
+    sourceManagers: ["youtube", "deezer", "soundcloud", "spotify"],
+    stats: { cpu: { nodelinkLoad: 0.1 }, playingPlayers: 25 },
+    searchOk: true,
+    searchLatencyMs: 420,
+  };
+  assert.ok(scoreProbedNode(activeFastSearch) > scoreProbedNode(ghostSlowSearch));
 });
